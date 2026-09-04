@@ -137,7 +137,7 @@ Highlight text anywhere (PPTX, PDF, Browser, IDE) and press F8!
 
 ## How It Works & Controls
 
-### Hotkey Cheatsheet
+### Hotkey Cheatsheet  
 
 | Primary Hotkey | Alternative Hotkey | Action | Description |
 | :--- | :--- | :--- | :--- |
