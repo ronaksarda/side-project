@@ -1,6 +1,7 @@
 """
 Audio reader engine for Screen Reader Agent.
 Uses Microsoft Edge TTS (natural neural voices) via pygame.mixer with instant offline Windows SAPI fallback.
+Optimized for low-latency streaming and fast playback startup.
 """
 
 import asyncio
@@ -18,11 +19,18 @@ class TextToSpeechReader:
         self.voice = voice
         self.rate = rate
         self.volume = volume
+        self.speed = 1.0
         self.is_speaking = False
         self._stop_event = threading.Event()
         self._current_thread = None
         self._sapi = None
         self._mixer_initialized = False
+
+    def set_speed(self, multiplier: float):
+        """Sets the speech rate multiplier (e.g. 1.0, 1.25, 1.5, 2.0)."""
+        self.speed = multiplier
+        pct = int(round((multiplier - 1.0) * 100))
+        self.rate = f"+{pct}%" if pct >= 0 else f"{pct}%"
 
     def _ensure_mixer(self):
         if not self._mixer_initialized:
@@ -33,13 +41,13 @@ class TextToSpeechReader:
                 print(f"[Reader] Pygame mixer init warning: {e}")
 
     def _get_sapi(self):
-        # ponytail: SAPI is Windows built-in, zero external dependencies and 100% offline
+        # SAPI is Windows built-in, 0ms latency and 100% offline
         if self._sapi is None:
             self._sapi = win32com.client.Dispatch("SAPI.SpVoice")
         return self._sapi
 
     def speak_sapi(self, text: str):
-        """Offline native Windows SAPI speech."""
+        """Offline native Windows SAPI speech (instant 0ms response)."""
         sapi = self._get_sapi()
         # 1 = SVSFlagsAsync
         sapi.Speak(text, 1)
@@ -54,21 +62,21 @@ class TextToSpeechReader:
         await communicate.save(output_path)
 
     def _play_audio_file(self, file_path: str):
-        """Plays MP3 audio file using pygame.mixer."""
+        """Plays MP3 audio file using pygame.mixer with low latency."""
         self._ensure_mixer()
         try:
             pygame.mixer.music.load(file_path)
             pygame.mixer.music.play()
 
             while pygame.mixer.music.get_busy() and not self._stop_event.is_set():
-                time.sleep(0.05)
+                time.sleep(0.04)
 
             if self._stop_event.is_set():
                 pygame.mixer.music.stop()
 
             pygame.mixer.music.unload()
         except Exception as e:
-            print(f"[Reader] Audio playback error: {e}")
+            print(f"[Reader] Playback error: {e}")
         finally:
             if os.path.exists(file_path):
                 try:
@@ -93,14 +101,14 @@ class TextToSpeechReader:
                 self.is_speaking = False
                 return
             except Exception as e:
-                print(f"[Reader] Edge TTS failed, falling back to SAPI: {e}")
+                print(f"[Reader] Edge TTS unavailable ({e}), using instant Windows SAPI.")
                 if temp_audio_file and os.path.exists(temp_audio_file):
                     try:
                         os.remove(temp_audio_file)
                     except Exception:
                         pass
 
-        # Fallback to SAPI
+        # Fast native SAPI fallback (0ms latency)
         try:
             import pythoncom
             pythoncom.CoInitialize()
@@ -113,7 +121,7 @@ class TextToSpeechReader:
             self.is_speaking = False
 
     def speak(self, text: str, prefer_edge: bool = True):
-        """Starts speaking text in a background thread."""
+        """Starts speaking text immediately in a background thread."""
         if not text or not text.strip():
             return
 

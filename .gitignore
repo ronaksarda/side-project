@@ -3,3 +3,5 @@ user_data/
 @AutomationLog.txt
 @Capture_Log.txt
 __pycache__/*
+
+tests/__pycache__

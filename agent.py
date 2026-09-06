@@ -8,9 +8,11 @@ import time
 import sys
 import threading
 import keyboard
+import win32gui
 from capture import get_selected_text
 from reader import TextToSpeechReader
 from llm import LocalLLM
+from widget import FloatingHUD
 
 
 class ScreenReaderAgent:
@@ -18,34 +20,50 @@ class ScreenReaderAgent:
         self.reader = TextToSpeechReader(voice=voice)
         self.llm = LocalLLM(model=model)
         self.is_busy = False
+        self.hud = None
 
-    def on_read_selection(self):
+    def on_read_selection(self, target_hwnd=None):
         """Reads highlighted text 100% verbatim with zero alterations."""
         if self.is_busy:
             self.reader.stop()
 
-        print("\n[Agent] [F8] Grabbing highlighted text...")
-        text = get_selected_text()
+        # If triggered from widget, ensure focus is on the target app
+        if target_hwnd and win32gui.IsWindow(target_hwnd):
+            try:
+                win32gui.SetForegroundWindow(target_hwnd)
+                time.sleep(0.04)
+            except Exception:
+                pass
+
+        print("\n[Agent] [Read] Grabbing highlighted text...")
+        text = get_selected_text(target_hwnd=target_hwnd)
         if not text:
-            print("[Agent] No text selected. Please highlight text with your mouse and press F8.")
+            print("[Agent] No text selected. Please highlight text with your mouse and trigger Read.")
             return
 
         print(f"[Agent] Exact Text ({len(text)} chars):\n----------------------------------------\n{text}\n----------------------------------------")
         print("[Agent] Reading aloud verbatim...")
         self.reader.speak(text)
 
-    def on_explain_selection(self):
+    def on_explain_selection(self, target_hwnd=None):
         """Explains highlighted text accurately using local LLM."""
         if self.is_busy:
             self.reader.stop()
 
+        if target_hwnd and win32gui.IsWindow(target_hwnd):
+            try:
+                win32gui.SetForegroundWindow(target_hwnd)
+                time.sleep(0.04)
+            except Exception:
+                pass
+
         def _worker():
             self.is_busy = True
             try:
-                print("\n[Agent] [F9] Grabbing highlighted text for explanation...")
-                text = get_selected_text()
+                print("\n[Agent] [Explain] Grabbing highlighted text for explanation...")
+                text = get_selected_text(target_hwnd=target_hwnd)
                 if not text:
-                    print("[Agent] No text selected. Highlight text and press F9.")
+                    print("[Agent] No text selected. Highlight text and trigger Explain.")
                     return
 
                 print(f"[Agent] Source Text ({len(text)} chars):\n{text}\n")
@@ -65,27 +83,28 @@ class ScreenReaderAgent:
         print("\n[Agent] [Stop] Halting playback.")
         self.reader.stop()
 
-    def start(self):
+    def start(self, enable_hud=True):
         ollama_status = f"Ready ({self.llm.model}) [Auto-Unload Active]" if self.llm.is_available() else "Offline (Verbatim speech active)"
         
         banner = f"""
 ===================================================================
-       LOCAL SCREEN READER AGENT (ZERO RESIDUAL VRAM)
+       LOCAL SCREEN READER AGENT (WITH FLOATING HUD)
 ===================================================================
   Ollama Status : {ollama_status}
   Voice Engine  : Microsoft Neural ({self.reader.voice})
   
-  CONTROLS:
-    [ F8 ]  or [ Ctrl+Alt+R ] -> READ exact highlighted text (100% Verbatim)
-    [ F9 ]  or [ Ctrl+Alt+E ] -> EXPLAIN highlighted text with Local LLM
-    [ Esc ] or [ F10 ]        -> STOP / MUTE immediately
-    [ Ctrl+C ] in terminal    -> Exit application
+  CONTROLS (Available via Floating Toolbar or Keyboard):
+    [ Read ]    / [ F8 ]  / [ Ctrl+Alt+R ] -> READ exact highlighted text (Verbatim)
+    [ Explain ] / [ F9 ]  / [ Ctrl+Alt+E ] -> EXPLAIN highlighted text with Local LLM
+    [ Stop ]    / [ Esc ] / [ F10 ]        -> STOP / MUTE immediately
+    [ Speed ]   (1.0x -> 1.25x -> 1.5x -> 2.0x) on floating widget
+    [ Ctrl+C ] in terminal                 -> Exit application
 ===================================================================
-Highlight text anywhere (PPTX, PDF, Browser, IDE) and press F8!
+Drag the floating widget anywhere on your screen!
 """
         print(banner)
 
-        # Register hotkeys
+        # Register global hotkeys
         keyboard.add_hotkey("F8", self.on_read_selection, suppress=False)
         keyboard.add_hotkey("ctrl+alt+r", self.on_read_selection, suppress=False)
         
@@ -95,13 +114,23 @@ Highlight text anywhere (PPTX, PDF, Browser, IDE) and press F8!
         keyboard.add_hotkey("F10", self.on_stop, suppress=False)
         keyboard.add_hotkey("esc", self.on_stop, suppress=False)
 
-        try:
-            while True:
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            print("\n[Agent] Shutting down...")
-            self.reader.stop()
-            self.llm.unload()
+        if enable_hud:
+            self.hud = FloatingHUD(self)
+            try:
+                self.hud.start()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                self.reader.stop()
+                self.llm.unload()
+        else:
+            try:
+                while True:
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                print("\n[Agent] Shutting down...")
+                self.reader.stop()
+                self.llm.unload()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """
 Screen and text capture module for Screen Reader Agent.
-Grabs 100% exact highlighted text across any active Windows application.
+Grabs highlighted text reliably across any active Windows application.
 """
 
 import time
@@ -8,15 +8,45 @@ import ctypes
 import pythoncom
 import win32clipboard
 import win32con
+import win32gui
+import win32process
+import keyboard
 import uiautomation as auto
 
 
-def get_selection_from_ui_automation() -> str:
-    """
-    Directly extracts selected/highlighted text from the active application
-    using Windows UI Automation TextPattern.
-    Safely initializes COM in whatever thread is calling it.
-    """
+def switch_to_window(hwnd):
+    """Brings the target application window to the active foreground."""
+    if not hwnd or not win32gui.IsWindow(hwnd):
+        return False
+    
+    fg = win32gui.GetForegroundWindow()
+    if fg == hwnd:
+        return True
+
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+
+        fg_thread = win32process.GetWindowThreadProcessId(fg)[0]
+        my_thread = win32process.GetWindowThreadProcessId(hwnd)[0]
+
+        ctypes.windll.user32.AttachThreadInput(fg_thread, my_thread, True)
+        win32gui.SetForegroundWindow(hwnd)
+        win32gui.BringWindowToTop(hwnd)
+        ctypes.windll.user32.AttachThreadInput(fg_thread, my_thread, False)
+        time.sleep(0.06)
+        return True
+    except Exception:
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.06)
+            return True
+        except Exception:
+            return False
+
+
+def get_selection_from_ui_automation(target_hwnd=None) -> str:
+    """Directly extracts selected text from UI Automation if available."""
     try:
         pythoncom.CoInitialize()
     except Exception:
@@ -24,11 +54,7 @@ def get_selection_from_ui_automation() -> str:
 
     try:
         focused = auto.GetFocusedControl()
-        if not focused:
-            return ""
-
-        # Check TextPattern
-        try:
+        if focused:
             pattern = focused.GetPattern(auto.PatternId.TextPattern)
             if pattern:
                 ranges = pattern.GetSelection()
@@ -36,22 +62,7 @@ def get_selection_from_ui_automation() -> str:
                     text = "".join([r.GetText(-1) for r in ranges]).strip()
                     if text:
                         return text
-        except Exception:
-            pass
-
-        # Check TextPattern2
-        try:
-            pattern2 = focused.GetPattern(auto.PatternId.TextPattern2)
-            if pattern2:
-                ranges = pattern2.GetSelection()
-                if ranges:
-                    text = "".join([r.GetText(-1) for r in ranges]).strip()
-                    if text:
-                        return text
-        except Exception:
-            pass
-
-    except Exception as e:
+    except Exception:
         pass
     finally:
         try:
@@ -73,69 +84,51 @@ def get_clipboard_text() -> str:
             win32clipboard.CloseClipboard()
             break
         except Exception:
-            time.sleep(0.02)
+            time.sleep(0.015)
     return text or ""
 
 
-def set_clipboard_text(text: str):
-    """Sets text in Windows clipboard."""
-    for _ in range(5):
-        try:
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
-            win32clipboard.CloseClipboard()
-            break
-        except Exception:
-            time.sleep(0.02)
-
-
-def clean_win32_copy():
-    """Simulates Ctrl+C safely without modifier key collisions."""
-    VK_CONTROL = 0x11
-    VK_C = 0x43
-    KEYEVENTF_KEYUP = 0x0002
-
-    # Release any lingering modifier keys first
-    ctypes.windll.user32.keybd_event(0x12, 0, KEYEVENTF_KEYUP, 0)  # ALT up
-    ctypes.windll.user32.keybd_event(0x10, 0, KEYEVENTF_KEYUP, 0)  # SHIFT up
-    ctypes.windll.user32.keybd_event(0x11, 0, KEYEVENTF_KEYUP, 0)  # CTRL up
-    time.sleep(0.05)
-
-    # Press Ctrl+C
-    ctypes.windll.user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    ctypes.windll.user32.keybd_event(VK_C, 0, 0, 0)
-    time.sleep(0.03)
-    ctypes.windll.user32.keybd_event(VK_C, 0, KEYEVENTF_KEYUP, 0)
-    ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-
-
-def get_selected_text() -> str:
+def get_selected_text(target_hwnd=None) -> str:
     """
-    Grabs the exact highlighted text on screen:
-    1. First tries UI Automation TextPattern selection.
-    2. Then performs clean Win32 copy into clipboard.
-    3. Falls back to existing clipboard content.
+    Grabs the highlighted text on screen:
+    1. Focuses target application if triggered from widget.
+    2. Tries UI Automation direct extraction.
+    3. Triggers simulated Ctrl+C via keyboard library.
+    4. If new text was copied, returns it.
+    5. If not, falls back to current clipboard text so nothing is lost.
     """
-    # 1. UI Automation direct inspect
-    uia_text = get_selection_from_ui_automation()
+    # 1. Focus target window if specified
+    if target_hwnd and win32gui.IsWindow(target_hwnd):
+        switch_to_window(target_hwnd)
+
+    # 2. Try UI Automation
+    uia_text = get_selection_from_ui_automation(target_hwnd=target_hwnd)
     if uia_text and uia_text.strip():
         return uia_text.strip()
 
-    # 2. Win32 safe copy
-    old_clip = get_clipboard_text()
-    set_clipboard_text("")
-    time.sleep(0.04)
+    # 3. Record clipboard sequence number
+    initial_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
+    prev_text = get_clipboard_text()
 
-    clean_win32_copy()
-    time.sleep(0.15)
+    # 4. Trigger Ctrl+C
+    keyboard.send("ctrl+c")
 
-    copied = get_clipboard_text()
-    if copied and copied.strip():
-        return copied.strip()
+    # 5. Check if clipboard changed
+    for _ in range(12):
+        time.sleep(0.02)
+        current_seq = ctypes.windll.user32.GetClipboardSequenceNumber()
+        if current_seq != initial_seq:
+            new_text = get_clipboard_text()
+            if new_text and new_text.strip():
+                return new_text.strip()
 
-    # 3. Fallback to existing clipboard
-    if old_clip and old_clip.strip():
-        return old_clip.strip()
+    # 6. If target app didn't change sequence number but updated text
+    latest_text = get_clipboard_text()
+    if latest_text and latest_text.strip() and latest_text != prev_text:
+        return latest_text.strip()
+
+    # 7. Fallback to existing clipboard text if present
+    if latest_text and latest_text.strip():
+        return latest_text.strip()
 
     return ""
